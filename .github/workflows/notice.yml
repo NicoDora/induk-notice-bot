@@ -1,0 +1,49 @@
+name: Induk Notice Checker
+
+on:
+  # 10분마다 실행
+  schedule:
+    - cron: "*/10 9-18 * * *"
+
+  # GitHub Actions에서 수동 실행 가능
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Repository 코드 가져오기
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Node.js 설치
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # 3. npm 패키지 설치
+      - name: Install dependencies
+        run: npm ci
+
+      # 4. Playwright Chromium 설치
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # 5. 공지사항 확인
+      - name: Check notices
+        run: node index.js
+        env:
+          # 인덕대학교 로그인 정보
+          INDUK_ID: ${{ secrets.INDUK_ID }}
+          INDUK_PASSWORD: ${{ secrets.INDUK_PASSWORD }}
+
+          # Telegram 정보
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          # GitHub API
+          GITHUB_TOKEN: ${{ secrets.NOTICE_VARIABLE_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

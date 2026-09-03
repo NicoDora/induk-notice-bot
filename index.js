@@ -1,35 +1,33 @@
-const path = require("node:path");
-const fs = require("fs");
 const { chromium } = require("playwright");
-
-process.loadEnvFile(path.join(__dirname, ".env"));
 
 const ID = process.env.INDUK_ID;
 const PASSWORD = process.env.INDUK_PASSWORD;
 
-const LAST_NOTICE_FILE = "./last_notice.json";
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-if (!ID || !PASSWORD) {
-  throw new Error("INDUK_ID와 INDUK_PASSWORD 환경변수가 필요합니다.");
-}
+const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
-/**
- * 인덕대학교 포털 로그인
- */
+const GITHUB_VARIABLE_NAME = "LAST_NOTICE_NUMBER";
+
+// ========================================
+// 인덕대학교 로그인
+// ========================================
+
 async function login(page) {
-  console.log("포털 접속...");
+  console.log("인덕대학교 포털 접속 중...");
 
   await page.goto("https://portal.induk.ac.kr/", {
     waitUntil: "domcontentloaded",
   });
 
-  console.log("현재 URL:", page.url());
-
   const loginId = page.locator('input[name="login_id"]');
   const password = page.locator('input[name="user_password"]');
 
+  // 로그인 페이지인지 확인
   if ((await loginId.count()) > 0) {
-    console.log("로그인 페이지 발견");
+    console.log("로그인 페이지 확인");
 
     await loginId.fill(ID);
     await password.fill(PASSWORD);
@@ -39,28 +37,27 @@ async function login(page) {
     await page.waitForTimeout(3000);
   }
 
-  console.log("로그인 후 URL:", page.url());
-
+  // SSO 페이지에 남아있다면 로그인 실패
   if (page.url().includes("sso.induk.ac.kr")) {
     throw new Error("로그인에 실패했습니다.");
   }
 
-  console.log("로그인 완료");
+  console.log("로그인 성공");
+  console.log(`현재 URL: ${page.url()}`);
 }
 
-/**
- * 인덕대학교 공지사항 가져오기
- */
+// ========================================
+// 공지사항 가져오기
+// ========================================
+
 async function getNotices(page) {
-  console.log("공지사항 페이지 접속...");
+  console.log("공지사항 페이지 접속 중...");
 
   await page.goto("https://portal.induk.ac.kr/p/BO06", {
     waitUntil: "domcontentloaded",
   });
 
   await page.waitForSelector('ul[data-name="post_list"]');
-
-  console.log("공지사항 URL:", page.url());
 
   const notices = await page
     .locator('ul[data-name="post_list"]')
@@ -98,144 +95,252 @@ async function getNotices(page) {
       });
     });
 
+  console.log(`${notices.length}개의 공지를 가져왔습니다.`);
+
   return notices;
 }
 
-/**
- * 마지막으로 확인한 공지 번호 읽기
- */
-function loadLastNoticeNumber() {
-  if (!fs.existsSync(LAST_NOTICE_FILE)) {
-    return null;
+// ========================================
+// GitHub Repository Variable 읽기
+// ========================================
+
+async function loadLastNoticeNumber() {
+  if (!GITHUB_REPOSITORY || !GITHUB_TOKEN) {
+    throw new Error("GITHUB_REPOSITORY 또는 GITHUB_TOKEN 환경변수가 없습니다.");
   }
 
-  const data = JSON.parse(fs.readFileSync(LAST_NOTICE_FILE, "utf-8"));
+  const url =
+    `https://api.github.com/repos/${GITHUB_REPOSITORY}` +
+    `/actions/variables/${GITHUB_VARIABLE_NAME}`;
 
-  return data.lastNoticeNumber;
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      "X-GitHub-Api-Version": "2026-03-10",
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+
+    throw new Error(`GitHub Variable 조회 실패: ${response.status} ${text}`);
+  }
+
+  const data = await response.json();
+
+  const number = Number(data.value);
+
+  if (!Number.isInteger(number)) {
+    throw new Error(
+      `LAST_NOTICE_NUMBER 값이 올바른 숫자가 아닙니다: ${data.value}`,
+    );
+  }
+
+  return number;
 }
 
-/**
- * 마지막으로 확인한 공지 번호 저장
- */
-function saveLastNoticeNumber(number) {
-  fs.writeFileSync(
-    LAST_NOTICE_FILE,
-    JSON.stringify(
-      {
-        lastNoticeNumber: number,
-      },
-      null,
-      2,
-    ),
-  );
+// ========================================
+// GitHub Repository Variable 업데이트
+// ========================================
+
+async function saveLastNoticeNumber(number) {
+  if (!GITHUB_REPOSITORY || !GITHUB_TOKEN) {
+    throw new Error("GITHUB_REPOSITORY 또는 GITHUB_TOKEN 환경변수가 없습니다.");
+  }
+
+  const url =
+    `https://api.github.com/repos/${GITHUB_REPOSITORY}` +
+    `/actions/variables/${GITHUB_VARIABLE_NAME}`;
+
+  const response = await fetch(url, {
+    method: "PATCH",
+
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      "X-GitHub-Api-Version": "2026-03-10",
+      "Content-Type": "application/json",
+    },
+
+    body: JSON.stringify({
+      name: GITHUB_VARIABLE_NAME,
+      value: String(number),
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+
+    throw new Error(
+      `GitHub Variable 업데이트 실패: ${response.status} ${text}`,
+    );
+  }
+
+  console.log(`LAST_NOTICE_NUMBER 업데이트 완료: ${number}`);
 }
 
-/**
- * 새 공지 찾기
- */
+// ========================================
+// 새 공지 찾기
+// ========================================
+
 function findNewNotices(notices, lastNoticeNumber) {
-  // 숫자 게시물만 대상으로 함
+  // "공지" 같은 고정 게시물 제외
   const normalNotices = notices.filter((notice) => /^\d+$/.test(notice.number));
 
-  // 번호를 숫자로 변환
+  // 최신 공지부터 정렬
   const sortedNotices = normalNotices.sort(
     (a, b) => Number(b.number) - Number(a.number),
   );
 
-  // 이전 기록이 없는 최초 실행
-  if (lastNoticeNumber === null) {
+  if (sortedNotices.length === 0) {
     return {
-      firstRun: true,
       newNotices: [],
-      latestNumber:
-        sortedNotices.length > 0 ? Number(sortedNotices[0].number) : null,
+      latestNumber: lastNoticeNumber,
     };
   }
 
-  // 이전 번호보다 큰 게시물만 새 공지
+  const latestNumber = Number(sortedNotices[0].number);
+
   const newNotices = sortedNotices.filter(
     (notice) => Number(notice.number) > Number(lastNoticeNumber),
   );
 
   return {
-    firstRun: false,
     newNotices,
-    latestNumber:
-      sortedNotices.length > 0
-        ? Number(sortedNotices[0].number)
-        : Number(lastNoticeNumber),
+    latestNumber,
   };
 }
 
-/**
- * 프로그램 시작
- */
+// ========================================
+// Telegram 메시지 전송
+// ========================================
+
+async function sendTelegramMessage(message) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    throw new Error("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID가 없습니다.");
+  }
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  const response = await fetch(url, {
+    method: "POST",
+
+    headers: {
+      "Content-Type": "application/json",
+    },
+
+    body: JSON.stringify({
+      chat_id: TELEGRAM_CHAT_ID,
+      text: message,
+      disable_web_page_preview: true,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram 메시지 전송 실패: ${JSON.stringify(data)}`);
+  }
+
+  console.log("Telegram 메시지 전송 성공");
+}
+
+// ========================================
+// 공지 → Telegram 메시지 변환
+// ========================================
+
+function createTelegramMessage(notice) {
+  return [
+    "🆕 인덕대학교 새 공지",
+    "",
+    `[${notice.number}] ${notice.title}`,
+    "",
+    `📁 분류: ${notice.category || "-"}`,
+    `👤 작성자: ${notice.author || "-"}`,
+    `📅 날짜: ${notice.date || "-"}`,
+    "",
+    `🔗 ${notice.url}`,
+  ].join("\n");
+}
+
+// ========================================
+// 메인
+// ========================================
+
 (async () => {
   const browser = await chromium.launch({
-    headless: false,
+    headless: true,
   });
 
   const context = await browser.newContext();
   const page = await context.newPage();
 
   try {
+    // ------------------------------------
     // 1. 로그인
+    // ------------------------------------
+
     await login(page);
 
+    // ------------------------------------
     // 2. 공지사항 가져오기
+    // ------------------------------------
+
     const notices = await getNotices(page);
 
-    console.log(`공지 ${notices.length}개 확인`);
+    // ------------------------------------
+    // 3. 마지막으로 확인한 공지 번호 가져오기
+    // ------------------------------------
 
-    // 3. 마지막 확인 번호 읽기
-    const lastNoticeNumber = loadLastNoticeNumber();
+    const lastNoticeNumber = await loadLastNoticeNumber();
 
-    console.log("마지막 확인 번호:", lastNoticeNumber ?? "없음");
+    console.log(`마지막 확인 공지: ${lastNoticeNumber}`);
 
-    // 4. 새 공지 찾기
+    // ------------------------------------
+    // 4. 새 공지 확인
+    // ------------------------------------
+
     const result = findNewNotices(notices, lastNoticeNumber);
 
-    // 5. 최초 실행
-    if (result.firstRun) {
-      console.log("\n최초 실행입니다.");
+    console.log(`새 공지 ${result.newNotices.length}개 발견`);
 
-      if (result.latestNumber !== null) {
-        saveLastNoticeNumber(result.latestNumber);
+    // ------------------------------------
+    // 5. 새 공지가 없으면 종료
+    // ------------------------------------
 
-        console.log(
-          `현재 최신 공지 번호 ${result.latestNumber}를 저장했습니다.`,
-        );
-      }
-
-      console.log("기존 공지는 알림을 보내지 않습니다.");
-
-      return;
-    }
-
-    // 6. 새 공지가 없는 경우
     if (result.newNotices.length === 0) {
-      console.log("\n새 공지가 없습니다.");
+      console.log("새 공지가 없습니다.");
       return;
     }
 
-    // 7. 새 공지가 있는 경우
-    console.log(`\n🆕 새 공지 ${result.newNotices.length}개 발견!`);
+    // ------------------------------------
+    // 6. 새 공지 Telegram 전송
+    // ------------------------------------
 
-    for (const notice of result.newNotices) {
-      console.log("\n===== 새 공지 =====");
+    // 오래된 공지부터 보내기
+    const newNotices = [...result.newNotices].reverse();
+
+    for (const notice of newNotices) {
       console.log(`[${notice.number}] ${notice.title}`);
-      console.log(`분류: ${notice.category}`);
-      console.log(`작성자: ${notice.author}`);
-      console.log(`날짜: ${notice.date}`);
-      console.log(`URL: ${notice.url}`);
+
+      const message = createTelegramMessage(notice);
+
+      await sendTelegramMessage(message);
     }
 
-    // 8. 최신 번호 저장
-    saveLastNoticeNumber(result.latestNumber);
+    // ------------------------------------
+    // 7. Telegram 전송 성공 후
+    //    마지막 공지 번호 업데이트
+    // ------------------------------------
 
-    console.log(`\n마지막 확인 번호를 ${result.latestNumber}로 저장했습니다.`);
+    await saveLastNoticeNumber(result.latestNumber);
   } catch (error) {
     console.error("오류:", error);
+
+    // 오류가 발생하면
+    // LAST_NOTICE_NUMBER를 업데이트하지 않음
+    process.exitCode = 1;
   } finally {
     await browser.close();
   }
